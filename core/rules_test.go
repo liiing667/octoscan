@@ -185,6 +185,46 @@ func TestRuleDangerousArtefact(t *testing.T) {
 	}
 }
 
+// The artifact chain across the jobs of a workflow: a producer uploads a sensitive artifact, a
+// consumer downloads it by name (or downloads everything) without hash verification.
+func TestRuleDangerousArtefactChain(t *testing.T) {
+	jobs := func(producer, consumer string) string {
+		return "on: push\njobs:\n" +
+			"  build:\n    runs-on: ubuntu-latest\n    steps:\n" + producer +
+			"  deploy:\n    runs-on: ubuntu-latest\n    needs: build\n    steps:\n" + consumer
+	}
+	upload := func(path string) string {
+		return "      - uses: actions/checkout@v4\n      - uses: actions/upload-artifact@v4\n        with:\n          name: workspace\n          path: " + path + "\n"
+	}
+	download := "      - uses: actions/download-artifact@v4\n        with:\n          name: workspace\n"
+
+	runCases(t, "dangerous-artefact", []ruleCase{
+		// the upload finding and the chain finding
+		{"sensitive upload downloaded and executed", jobs(upload("."), download+"      - run: ./run.sh\n"), 2},
+		{"download of every artifact", jobs(upload(".git"), "      - uses: actions/download-artifact@v4\n      - run: ls\n"), 2},
+		{"download of another artifact", jobs(upload("."), strings.Replace(download, "workspace", "other", 1)), 1},
+		{"download pinned to a commit", jobs(upload("."), "      - uses: dawidd6/action-download-artifact@v6\n        with:\n          name: workspace\n          commit: 0123456789abcdef0123456789abcdef01234567\n      - run: ./run.sh\n"), 1},
+		{"no consumer", jobs(upload("."), "      - run: make\n"), 1},
+		// normal test artifacts keep passing
+		{"test artifact downloaded and tested", jobs(upload("dist/"), download+"      - run: make test\n"), 0},
+		{"narrow path, download of everything", jobs(upload("coverage/"), "      - uses: actions/download-artifact@v4\n      - run: make coverage\n"), 0},
+	})
+
+	// the chain finding names the producer, the consumer and what the artifact carries
+	errs := lint(t, "dangerous-artefact", jobs(upload("."), download+"      - run: ./run.sh\n"))
+	if len(errs) != 2 {
+		t.Fatalf("got %d findings, want 2", len(errs))
+	}
+
+	chain := errs[1].Message
+
+	for _, want := range []string{`"workspace"`, `"build"`, `"deploy"`, "without hash verification", "persists the credentials", "executes it"} {
+		if !strings.Contains(chain, want) {
+			t.Errorf("chain message %q does not contain %q", chain, want)
+		}
+	}
+}
+
 func TestRuleUnsecureCommands(t *testing.T) {
 	const env = "ACTIONS_ALLOW_UNSECURE_COMMANDS: true\n"
 

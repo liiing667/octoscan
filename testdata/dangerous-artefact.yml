@@ -1,6 +1,6 @@
 # VULNERABLE EXAMPLE for the "dangerous-artefact" rule, do not use it as a template.
 # Run:    ./octoscan scan testdata/dangerous-artefact.yml
-# expect: dangerous-artefact=8
+# expect: dangerous-artefact=9
 
 # upload-artifact of the workspace publishes everything the job wrote, including .git/config where actions/checkout
 # stores the GITHUB_TOKEN ("artipacked"). The artifacts of a public repository can be downloaded by anybody.
@@ -65,3 +65,16 @@ jobs:
             .
             **/.git/**
             .*
+
+  # the chain: the "build" artifact holds the workspace and the token of the checkout, this job
+  # downloads it by name without hash verification and runs it with a write token
+  consumer:
+    runs-on: ubuntu-latest
+    needs: workspace
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
+      - run: ./build/restore.sh

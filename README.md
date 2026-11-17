@@ -372,6 +372,8 @@ Check for workflow that upload artefacts containing sensitive files like `.git/c
 
 It reports uploads of the whole workspace (`.`, `**`, `~`, ...) and of the `.git` directory. When a previous `actions/checkout` of the job does not set `persist-credentials: false`, the finding says that the token stored in `.git/config` is leaked too (the "artipacked" vulnerability).
 
+The rule also follows the artifacts across the jobs of the workflow: when a sensitive upload is downloaded by another job (`actions/download-artifact`, or `dawidd6/action-download-artifact` without `commit`/`check_artifacts`) without hash verification, the finding gives the chain — the producer job and what the artifact carries (broad path, `.git`, persisted token and its write permissions), and the consumer job (execution in a `run` step, write permissions). Artifacts with a narrow path (test results, build directories) are not part of a chain.
+
 ### overprovisioned-secrets
 
 Check for `${{ toJSON(secrets) }}` and dynamic accesses like `${{ secrets[matrix.name] }}`. The whole secrets context ends up in the step, so a single injection or a compromised action gets every secret of the repository instead of the one it needs.
