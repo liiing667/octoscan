@@ -89,6 +89,14 @@ func TestPositionsOfAllRules(t *testing.T) {
 		scriptRun("overprovisioned-secrets", "push", `echo '${{ toJSON(secrets) }}'`, `toJSON(secrets)`),
 		scriptRun("expression-injection", "issues", `echo "${{ github.event.issue.title }}"`, `github.event.issue.title`),
 		{
+			rule: "expression-injection",
+			build: func(kv string) string {
+				return "on: issues\njobs:\n  a:\n    runs-on: ubuntu-latest\n    outputs:\n      t: ${{ github.event.issue.title }}\n    steps:\n      - run: echo\n  b:\n    runs-on: ubuntu-latest\n    needs: a\n    steps:\n      - " + kv + "\n"
+			},
+			key: "run:", keyIndent: 8, lines: []string{"echo one", `echo "${{ needs.a.outputs.t }}"`, "echo two"}, at: 1,
+			needle: "needs.a.outputs.t", singleLine: true,
+		},
+		{
 			rule: "dangerous-action",
 			build: func(kv string) string {
 				return step("pull_request_target", "      - uses: actions/github-script@v7\n        with:\n          "+kv+"\n")

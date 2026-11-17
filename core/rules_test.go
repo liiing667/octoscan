@@ -124,6 +124,41 @@ func TestRuleExpressionInjection(t *testing.T) {
 	})
 }
 
+// The rule follows the values from the event to the sinks: an environment variable, a job output, a step output
+// or a workflow_call input is only untrusted when its own value is. Boolean contexts, values passed as shell
+// arguments and sanitizing functions stay allowed.
+func TestRuleExpressionInjectionDataFlow(t *testing.T) {
+	twoJobs := func(outputs, producer, consumer string) string {
+		return "on: issues\njobs:\n  a:\n    runs-on: ubuntu-latest\n" + outputs + "    steps:\n" + producer +
+			"  b:\n    runs-on: ubuntu-latest\n    needs: a\n    steps:\n" + consumer
+	}
+
+	runCases(t, "expression-injection", []ruleCase{
+		// env: the taint is in the value, not in the context
+		{"tainted env used as an expression", step("issues", "      - run: echo \"${{ env.TITLE }}\"\n        env:\n          TITLE: ${{ github.event.issue.title }}\n"), 1},
+		{"static env used as an expression", step("issues", "      - run: echo \"${{ env.TITLE }}\"\n        env:\n          TITLE: hello\n"), 0},
+		{"tainted workflow env", "on: issues\nenv:\n  TITLE: ${{ github.event.issue.title }}\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ env.TITLE }}\"\n", 1},
+		{"tainted env passed as a shell argument", step("issues", "      - run: echo \"$TITLE\"\n        env:\n          TITLE: ${{ github.event.issue.title }}\n"), 0},
+		{"env tainted through another env var", "on: issues\nenv:\n  A: ${{ github.event.issue.title }}\njobs:\n  j:\n    runs-on: ubuntu-latest\n    env:\n      B: ${{ env.A }}\n    steps:\n      - run: echo \"${{ env.B }}\"\n", 1},
+		{"job env shadows the tainted workflow env", "on: issues\nenv:\n  A: ${{ github.event.issue.title }}\njobs:\n  j:\n    runs-on: ubuntu-latest\n    env:\n      A: static\n    steps:\n      - run: echo \"${{ env.A }}\"\n", 0},
+		{"tainted env only compared", step("issues", "      - run: echo \"${{ env.TITLE == 'x' }}\"\n        env:\n          TITLE: ${{ github.event.issue.title }}\n"), 0},
+		{"tainted env sanitized", step("issues", "      - run: echo \"${{ contains(env.TITLE, 'x') }}\"\n        env:\n          TITLE: ${{ github.event.issue.title }}\n"), 0},
+		// step outputs: what is written to GITHUB_OUTPUT is what flows
+		{"tainted step output", step("issues", "      - id: s\n        run: echo \"x=${{ github.event.issue.title }}\" >> \"$GITHUB_OUTPUT\"\n      - run: echo \"${{ steps.s.outputs.x }}\"\n"), 2},
+		{"static step output", step("issues", "      - id: s\n        run: echo \"x=hello\" >> \"$GITHUB_OUTPUT\"\n      - run: echo \"${{ steps.s.outputs.x }}\"\n"), 0},
+		{"tainted step output in a heredoc", step("issues", "      - id: s\n        run: |\n          echo \"x<<EOF\" >> \"$GITHUB_OUTPUT\"\n          echo \"${{ github.event.issue.body }}\"\n          echo EOF >> /dev/null\n      - run: echo \"${{ steps.s.outputs.x }}\"\n"), 2},
+		// job outputs: the indirect flow across jobs
+		{"tainted job output", twoJobs("    outputs:\n      t: ${{ github.event.issue.title }}\n", "      - run: echo\n", "      - run: echo \"${{ needs.a.outputs.t }}\"\n"), 1},
+		{"static job output", twoJobs("    outputs:\n      t: hello\n", "      - run: echo\n", "      - run: echo \"${{ needs.a.outputs.t }}\"\n"), 0},
+		{"job output tainted through a step output", twoJobs("    outputs:\n      t: ${{ steps.s.outputs.x }}\n", "      - id: s\n        run: echo \"x=${{ github.event.issue.title }}\" >> \"$GITHUB_OUTPUT\"\n", "      - run: echo \"${{ needs.a.outputs.t }}\"\n"), 2},
+		{"job output only compared", twoJobs("    outputs:\n      t: ${{ github.event.issue.title }}\n", "      - run: echo\n", "      - run: echo \"${{ needs.a.outputs.t == 'x' }}\"\n"), 0},
+		// workflow_call: the inputs are controlled by the caller
+		{"workflow_call string input", "on:\n  workflow_call:\n    inputs:\n      title:\n        type: string\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ inputs.title }}\"\n", 1},
+		{"workflow_call boolean input", "on:\n  workflow_call:\n    inputs:\n      flag:\n        type: boolean\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ inputs.flag }}\"\n", 0},
+		{"inputs without workflow_call", step("issues", "      - run: echo \"${{ inputs.title }}\"\n"), 0},
+	})
+}
+
 func TestRuleDangerousWrite(t *testing.T) {
 	runCases(t, "dangerous-write", []ruleCase{
 		{"bash output", step("push", "      - run: echo \"a=$B\" >> \"$GITHUB_OUTPUT\"\n"), 1},

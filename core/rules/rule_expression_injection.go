@@ -30,45 +30,40 @@ I need to add new UntrustedInput and check for expression injection in some fiel
 package rules
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/rhysd/actionlint"
 )
 
-// var envUntrustedInputSearchRoots = actionlint.NewUntrustedInputMap("env")
+// stepOutputKey identifies one output of one step for the taint memoization.
+type stepOutputKey struct {
+	step *actionlint.Step
+	name string
+}
 
-var needsOutputData = actionlint.NewUntrustedInputMap("needs",
-	actionlint.NewUntrustedInputMap("**",
-		actionlint.NewUntrustedInputMap("outputs",
-			actionlint.NewUntrustedInputMap("**"),
-		),
-	),
-)
-
-var stepsOutputData = actionlint.NewUntrustedInputMap("steps",
-	actionlint.NewUntrustedInputMap("**",
-		actionlint.NewUntrustedInputMap("outputs",
-			actionlint.NewUntrustedInputMap("**"),
-		),
-	),
-)
-
-var envUntrustedInput = actionlint.NewUntrustedInputMap("env",
-	actionlint.NewUntrustedInputMap("**"),
-)
-
-var CustomUntrustedInputSearchRoots = []*actionlint.UntrustedInputMap{
-	envUntrustedInput,
-	needsOutputData,
-	stepsOutputData,
+// evalScope is the scope in which an expression is evaluated: the environment variables of the workflow, of job
+// and of step are visible, as well as the outputs of the steps of job.
+type evalScope struct {
+	job  *actionlint.Job
+	step *actionlint.Step
 }
 
 type RuleExpressionInjection struct {
 	actionlint.RuleBase
-	customUntrustedInputSearchRoots actionlint.UntrustedInputSearchRoots
-	filterTriggers                  []string
-	skip                            bool
-	filterRun                       bool
+	filterTriggers []string
+	skip           bool
+	filterRun      bool
+
+	// taint tracking state, reset on each workflow
+	callInputs    []string // names of the string inputs of the workflow_call trigger
+	workflowEnv   *actionlint.Env
+	jobs          map[string]*actionlint.Job
+	job           *actionlint.Job  // job being visited
+	step          *actionlint.Step // step being visited
+	stepWrites    map[*actionlint.Step]map[string][]string
+	taintMemo     map[any]bool
+	taintVisiting map[any]bool
 }
 
 // NewRuleExpressionInjection creates new RuleExpressionInjection instance.
@@ -78,11 +73,9 @@ func NewRuleExpressionInjection(filterTriggers []string, filterRun bool) *RuleEx
 			"expression-injection",
 			"Check for expression injection.",
 		),
-		// note that the map is overloaded in init.go
-		customUntrustedInputSearchRoots: actionlint.BuiltinUntrustedInputs,
-		filterTriggers:                  filterTriggers,
-		skip:                            false,
-		filterRun:                       filterRun,
+		filterTriggers: filterTriggers,
+		skip:           false,
+		filterRun:      filterRun,
 	}
 }
 
@@ -90,11 +83,40 @@ func (rule *RuleExpressionInjection) VisitWorkflowPre(n *actionlint.Workflow) er
 	// check on event and set skip if needed
 	rule.skip = skipAnalysis(n, rule.filterTriggers)
 
+	// the inputs of a workflow_call trigger are controlled by the caller: they are as untrusted as the data the
+	// caller passes, which may come from the event
+	rule.callInputs = nil
+
+	for _, e := range n.On {
+		call, ok := e.(*actionlint.WorkflowCallEvent)
+		if !ok {
+			continue
+		}
+
+		for _, i := range call.Inputs {
+			// only string inputs can carry an injection, booleans and numbers are coerced
+			if i.Name != nil && (i.Type == actionlint.WorkflowCallEventInputTypeString || i.Type == actionlint.WorkflowCallEventInputTypeInvalid) {
+				rule.callInputs = append(rule.callInputs, i.Name.Value)
+			}
+		}
+	}
+
+	rule.workflowEnv = n.Env
+	rule.jobs = n.Jobs
+	rule.job = nil
+	rule.step = nil
+	rule.stepWrites = map[*actionlint.Step]map[string][]string{}
+	rule.taintMemo = map[any]bool{}
+	rule.taintVisiting = map[any]bool{}
+
 	return nil
 }
 
 // VisitJobPre is callback when visiting Job node before visiting its children.
 func (rule *RuleExpressionInjection) VisitJobPre(n *actionlint.Job) error {
+
+	rule.job = n
+	rule.step = nil
 
 	if n.Services != nil {
 		for _, s := range n.Services.Value {
@@ -105,8 +127,18 @@ func (rule *RuleExpressionInjection) VisitJobPre(n *actionlint.Job) error {
 	return nil
 }
 
+// VisitJobPost is callback when visiting Job node after visiting its children.
+func (rule *RuleExpressionInjection) VisitJobPost(n *actionlint.Job) error {
+	rule.job = nil
+	rule.step = nil
+
+	return nil
+}
+
 // VisitStep is callback when visiting Step node.
 func (rule *RuleExpressionInjection) VisitStep(n *actionlint.Step) error {
+
+	rule.step = n
 
 	if rule.skip {
 		return nil
@@ -241,7 +273,7 @@ func convertExprLineColToPos(line, col, lineBase, colBase int) *actionlint.Pos {
 func (rule *RuleExpressionInjection) checkExpressionInjection(expr actionlint.ExprNode) []*actionlint.ExprError {
 	errs := []*actionlint.ExprError{}
 
-	untrusted := actionlint.NewUntrustedInputChecker(rule.customUntrustedInputSearchRoots)
+	untrusted := actionlint.NewUntrustedInputChecker(rule.untrustedRoots(evalScope{job: rule.job, step: rule.step}))
 	untrusted.Init()
 
 	inspectExprNode(expr, untrusted)
@@ -250,6 +282,299 @@ func (rule *RuleExpressionInjection) checkExpressionInjection(expr actionlint.Ex
 	errs = append(errs, untrusted.Errs()...)
 
 	return errs
+}
+
+// untrustedRoots builds the untrusted input search roots for an expression evaluated in scope: the event payloads
+// of actionlint, plus the values this workflow taints itself (environment variables, job outputs, step outputs and
+// workflow_call inputs).
+func (rule *RuleExpressionInjection) untrustedRoots(scope evalScope) actionlint.UntrustedInputSearchRoots {
+	roots := actionlint.UntrustedInputSearchRoots{
+		"github": actionlint.BuiltinUntrustedInputs["github"],
+	}
+
+	if children := rule.taintedEnvChildren(scope); len(children) > 0 {
+		roots["env"] = actionlint.NewUntrustedInputMap("env", children...)
+	}
+
+	if children := rule.taintedNeedsChildren(); len(children) > 0 {
+		roots["needs"] = actionlint.NewUntrustedInputMap("needs", children...)
+	}
+
+	if scope.job != nil {
+		if children := rule.taintedStepsChildren(scope.job); len(children) > 0 {
+			roots["steps"] = actionlint.NewUntrustedInputMap("steps", children...)
+		}
+	}
+
+	if len(rule.callInputs) > 0 {
+		children := make([]*actionlint.UntrustedInputMap, 0, len(rule.callInputs))
+		for _, name := range rule.callInputs {
+			children = append(children, actionlint.NewUntrustedInputMap(name))
+		}
+		roots["inputs"] = actionlint.NewUntrustedInputMap("inputs", children...)
+	}
+
+	return roots
+}
+
+// taintedEnvChildren returns the search nodes of the environment variables visible in scope whose value is
+// tainted. The nearest definition wins: step over job over workflow.
+func (rule *RuleExpressionInjection) taintedEnvChildren(scope evalScope) []*actionlint.UntrustedInputMap {
+	seen := map[string]bool{}
+	children := []*actionlint.UntrustedInputMap{}
+
+	collect := func(env *actionlint.Env, defScope evalScope) {
+		if env == nil {
+			return
+		}
+
+		for name, v := range env.Vars {
+			if seen[name] {
+				continue
+			}
+
+			seen[name] = true
+
+			if rule.envVarTainted(v, defScope) {
+				children = append(children, actionlint.NewUntrustedInputMap(name))
+			}
+		}
+	}
+
+	if scope.step != nil {
+		collect(scope.step.Env, scope)
+	}
+
+	if scope.job != nil {
+		collect(scope.job.Env, evalScope{job: scope.job})
+	}
+
+	collect(rule.workflowEnv, evalScope{})
+
+	return children
+}
+
+// taintedNeedsChildren returns the search nodes of the tainted job outputs: "needs.<job_id>.outputs.<name>".
+func (rule *RuleExpressionInjection) taintedNeedsChildren() []*actionlint.UntrustedInputMap {
+	children := []*actionlint.UntrustedInputMap{}
+
+	for _, job := range rule.jobs {
+		outputs := []*actionlint.UntrustedInputMap{}
+
+		for name, o := range job.Outputs {
+			if o.Name != nil {
+				name = o.Name.Value
+			}
+
+			if rule.jobOutputTainted(o, job) {
+				outputs = append(outputs, actionlint.NewUntrustedInputMap(name))
+			}
+		}
+
+		if len(outputs) > 0 && job.ID != nil {
+			children = append(children, actionlint.NewUntrustedInputMap(job.ID.Value,
+				actionlint.NewUntrustedInputMap("outputs", outputs...)))
+		}
+	}
+
+	return children
+}
+
+// taintedStepsChildren returns the search nodes of the tainted step outputs of the job:
+// "steps.<step_id>.outputs.<name>".
+func (rule *RuleExpressionInjection) taintedStepsChildren(job *actionlint.Job) []*actionlint.UntrustedInputMap {
+	children := []*actionlint.UntrustedInputMap{}
+
+	for _, s := range job.Steps {
+		if s.ID == nil {
+			continue
+		}
+
+		outputs := []*actionlint.UntrustedInputMap{}
+
+		for name := range rule.githubOutputWrites(s) {
+			if rule.stepOutputTainted(s, name, job) {
+				outputs = append(outputs, actionlint.NewUntrustedInputMap(name))
+			}
+		}
+
+		if len(outputs) > 0 {
+			children = append(children, actionlint.NewUntrustedInputMap(s.ID.Value,
+				actionlint.NewUntrustedInputMap("outputs", outputs...)))
+		}
+	}
+
+	return children
+}
+
+func (rule *RuleExpressionInjection) envVarTainted(v *actionlint.EnvVar, scope evalScope) bool {
+	if v == nil || v.Value == nil {
+		return false
+	}
+
+	if t, ok := rule.taintMemo[v]; ok {
+		return t
+	}
+
+	if rule.taintVisiting[v] {
+		return false // a definition cycle cannot taint itself
+	}
+
+	rule.taintVisiting[v] = true
+	t := rule.valueTainted(v.Value.Value, scope)
+	delete(rule.taintVisiting, v)
+
+	rule.taintMemo[v] = t
+
+	return t
+}
+
+func (rule *RuleExpressionInjection) jobOutputTainted(o *actionlint.Output, job *actionlint.Job) bool {
+	if o == nil || o.Value == nil {
+		return false
+	}
+
+	if t, ok := rule.taintMemo[o]; ok {
+		return t
+	}
+
+	if rule.taintVisiting[o] {
+		return false
+	}
+
+	rule.taintVisiting[o] = true
+	t := rule.valueTainted(o.Value.Value, evalScope{job: job})
+	delete(rule.taintVisiting, o)
+
+	rule.taintMemo[o] = t
+
+	return t
+}
+
+func (rule *RuleExpressionInjection) stepOutputTainted(step *actionlint.Step, name string, job *actionlint.Job) bool {
+	key := stepOutputKey{step, name}
+
+	if t, ok := rule.taintMemo[key]; ok {
+		return t
+	}
+
+	if rule.taintVisiting[key] {
+		return false
+	}
+
+	rule.taintVisiting[key] = true
+
+	tainted := false
+
+	for _, v := range rule.githubOutputWrites(step)[name] {
+		if rule.valueTainted(v, evalScope{job: job, step: step}) {
+			tainted = true
+
+			break
+		}
+	}
+
+	delete(rule.taintVisiting, key)
+
+	rule.taintMemo[key] = tainted
+
+	return tainted
+}
+
+// valueTainted reports whether one of the ${{ }} expressions of the value is untrusted in scope. Boolean contexts
+// (comparisons, negations) and the sanitizing functions are not tainted, like at the sinks.
+func (rule *RuleExpressionInjection) valueTainted(value string, scope evalScope) bool {
+	s := value
+
+	for {
+		idx := strings.Index(s, "${{")
+		if idx == -1 {
+			return false
+		}
+
+		s = s[idx+3:]
+
+		l := actionlint.NewExprLexer(s)
+		p := actionlint.NewExprParser()
+
+		expr, err := p.Parse(l)
+		if err != nil {
+			return false
+		}
+
+		checker := actionlint.NewUntrustedInputChecker(rule.untrustedRoots(scope))
+		checker.Init()
+
+		inspectExprNode(expr, checker)
+
+		checker.OnVisitEnd()
+
+		if len(checker.Errs()) > 0 {
+			return true
+		}
+
+		s = s[l.Offset():]
+	}
+}
+
+var (
+	githubOutputRe  = regexp.MustCompile(`>>\s*"?\$?(?:[Ee][Nn][Vv]:)?\{?GITHUB_OUTPUT\}?`)
+	outputAssignRe  = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)=`)
+	outputHeredocRe = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)<<-?\s*'?([A-Za-z0-9_.-]+)'?`)
+)
+
+// githubOutputWrites parses the writes to GITHUB_OUTPUT of the run script of a step. It maps an output name to the
+// values written to it, in the "name=value" form and in the "name<<DELIM" heredoc form.
+func (rule *RuleExpressionInjection) githubOutputWrites(step *actionlint.Step) map[string][]string {
+	if w, ok := rule.stepWrites[step]; ok {
+		return w
+	}
+
+	writes := map[string][]string{}
+
+	run, ok := step.Exec.(*actionlint.ExecRun)
+	if !ok || run.Run == nil {
+		rule.stepWrites[step] = writes
+
+		return writes
+	}
+
+	lines := strings.Split(run.Run.Value, "\n")
+
+	for i := 0; i < len(lines); i++ {
+		loc := githubOutputRe.FindStringIndex(lines[i])
+		if loc == nil {
+			continue
+		}
+
+		payload := lines[i][:loc[0]]
+
+		if m := outputHeredocRe.FindStringSubmatch(payload); m != nil {
+			body := []string{}
+
+			for i+1 < len(lines) {
+				i++
+
+				if strings.TrimSpace(lines[i]) == m[2] {
+					break
+				}
+
+				body = append(body, lines[i])
+			}
+
+			writes[m[1]] = append(writes[m[1]], strings.Join(body, "\n"))
+
+			continue
+		}
+
+		if m := outputAssignRe.FindStringSubmatchIndex(payload); m != nil {
+			writes[payload[m[2]:m[3]]] = append(writes[payload[m[2]:m[3]]], payload[m[3]+1:])
+		}
+	}
+
+	rule.stepWrites[step] = writes
+
+	return writes
 }
 
 // inspectExprNode feeds the untrusted input checker with every node of expr, like actionlint does:

@@ -1,6 +1,6 @@
 # VULNERABLE EXAMPLE for the "expression-injection" rule, do not use it as a template.
 # Run:    ./octoscan scan testdata/expression-injection.yml
-# expect: expression-injection=8
+# expect: expression-injection=9
 
 # Untrusted data (issue, comment, PR title/body, branch name...) expanded with ${{ }} in a script is a command
 # injection: the value is pasted in the script before the shell runs it.
@@ -19,6 +19,8 @@ jobs:
   greet:
     runs-on: ubuntu-latest
     if: github.event_name == 'issues'
+    outputs:
+      title: ${{ github.event.issue.title }}
     steps:
       - run: echo "Thanks for opening ${{ github.event.issue.title }}"
 
@@ -61,3 +63,11 @@ jobs:
           cat > summary.md <<'EOF'
           ${{ github.event.pull_request.body }}
           EOF
+
+  # the title crosses a job boundary: an output of "greet" flows into the script of "notify" through "needs"
+  notify:
+    runs-on: ubuntu-latest
+    needs: greet
+    if: github.event_name == 'issues'
+    steps:
+      - run: echo "opened ${{ needs.greet.outputs.title }}"
