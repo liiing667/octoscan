@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -38,13 +39,13 @@ func scanDir(t *testing.T, dir string) map[string]int {
 		t.Fatal(err)
 	}
 
-	errs, err := (&OctoLinter{Linter: *l}).LintRepositoryRecurse(dir)
+	report, err := (&OctoLinter{Linter: *l}).LintRepositoryRecurse(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	kinds := map[string]int{}
-	for _, e := range errs {
+	for _, e := range report.Findings {
 		kinds[e.Kind]++
 	}
 

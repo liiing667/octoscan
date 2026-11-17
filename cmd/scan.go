@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
 
 	"github.com/synacktiv/octoscan/common"
@@ -81,15 +83,7 @@ func runScanner(args docopt.Opts) int {
 	streamed := args["--format"] == nil
 
 	if common.IsDirectory(file) {
-		octoLinter := &core.OctoLinter{Linter: *l}
-		if streamed {
-			octoLinter.OnFile = func(batch []*actionlint.Error) {
-				core.FixPositions(batch)
-				printErrors(os.Stdout, batch, opts.Oneline)
-			}
-		}
-
-		errs, err = octoLinter.LintRepositoryRecurse(file)
+		errs, err = scanDirectory(l, file, streamed, opts.Oneline)
 	} else {
 		errs, err = l.LintFile(file, nil)
 	}
@@ -100,25 +94,7 @@ func runScanner(args docopt.Opts) int {
 		return common.ExitStatusFailure
 	}
 
-	if streamed {
-		if !common.IsDirectory(file) {
-			core.FixPositions(errs)
-			printErrors(os.Stdout, errs, opts.Oneline)
-		}
-	} else {
-		core.FixPositions(errs)
-
-		switch format := args["--format"].(string); format {
-		case "json":
-			opts.Format = "{{json .}}"
-		case "sarif":
-			opts.Format = string(common.SarifTemplate)
-		default:
-			opts.Format = format
-		}
-		// Now we can use our own formatter on all the errors.
-		err = core.DisplayErrors(os.Stdout, opts.Format, errs)
-	}
+	err = renderFindings(args, file, streamed, errs, opts)
 
 	if err != nil {
 		common.Log.Error(err)
@@ -131,6 +107,94 @@ func runScanner(args docopt.Opts) int {
 	}
 
 	return common.ExitStatusSuccessNoProblem
+}
+
+// renderFindings prints the findings, streamed as the scan goes for the default format or all at once otherwise.
+func renderFindings(args docopt.Opts, file string, streamed bool, errs []*actionlint.Error,
+	opts actionlint.LinterOptions) error {
+	if streamed {
+		if !common.IsDirectory(file) {
+			core.FixPositions(errs)
+			printErrors(os.Stdout, errs, opts.Oneline)
+		}
+
+		return nil
+	}
+
+	core.FixPositions(errs)
+
+	switch format := args["--format"].(string); format {
+	case "json":
+		opts.Format = "{{json .}}"
+	case "sarif":
+		opts.Format = string(common.SarifTemplate)
+	default:
+		opts.Format = format
+	}
+	// Now we can use our own formatter on all the errors.
+	return core.DisplayErrors(os.Stdout, opts.Format, errs)
+}
+
+// scanDirectory runs a recursive, interruptible scan of a directory and returns the gathered findings together with
+// the auditable summary of every workflow file.
+func scanDirectory(l *actionlint.Linter, dir string, streamed bool, oneline bool) ([]*actionlint.Error, error) {
+	octoLinter := &core.OctoLinter{Linter: *l}
+	if streamed {
+		octoLinter.OnFile = func(batch []*actionlint.Error) {
+			core.FixPositions(batch)
+			printErrors(os.Stdout, batch, oneline)
+		}
+	}
+
+	// the first interrupt asks for a graceful stop: the file being scanned finishes but no new file is started,
+	// a second interrupt terminates the process
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		signal.Stop(signals)
+		cancel()
+	}()
+
+	go func() {
+		if _, ok := <-signals; ok {
+			common.Log.Info("interrupted, finishing the current workflow and stopping the scan")
+			cancel()
+		}
+	}()
+
+	report, err := octoLinter.LintRepositoryRecurse(ctx, dir)
+
+	printScanSummary(report)
+
+	return report.Findings, err
+}
+
+// printScanSummary makes an incomplete directory scan auditable: every workflow file is accounted for with one
+// unified status (success, parse failure, rule failure or read failure) and the files whose result is incomplete
+// are listed. Such a scan still succeeds, so the SARIF output and the exit code only reflect the findings.
+func printScanSummary(report *core.ScanReport) {
+	if report == nil {
+		return
+	}
+
+	if report.Cancelled {
+		common.Log.Info("scan was cancelled: the report only contains the workflows scanned before the interruption")
+	}
+
+	common.Log.Info(fmt.Sprintf(
+		"scan summary: %d workflow(s): %d success, %d rule failure(s), %d parse failure(s), %d read failure(s)",
+		len(report.Files),
+		report.Count(core.FileStatusSuccess),
+		report.Count(core.FileStatusRuleFailure),
+		report.Count(core.FileStatusParseFailure),
+		report.Count(core.FileStatusReadFailure),
+	))
+
+	for _, file := range report.FailedFiles() {
+		common.Log.Error(fmt.Sprintf("%s: %s: %v", file.Status, file.Path, file.Err))
+	}
 }
 
 // printErrors prints the errors like actionlint does.
