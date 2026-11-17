@@ -39,9 +39,16 @@ func TestRuleDangerousAction(t *testing.T) {
 	runCases(t, "dangerous-action", []ruleCase{
 		{"external download action", step(on, "      - uses: dawidd6/action-download-artifact@v6\n"), 1},
 		{"external download action with repo", step(on, "      - uses: dawidd6/action-download-artifact@v6\n        with:\n          repo: foo/bar\n"), 1},
+		{"external download action with another case", step(on, "      - uses: Dawidd6/Action-Download-Artifact@v6\n"), 1},
+		{"external download action pinned to a SHA", step(on, "      - uses: dawidd6/action-download-artifact@2f00e0a2c4c0a4fb8f3a4b3b6b7a0a2a1f0e0d01\n"), 1},
+		{"external download action with a short SHA", step(on, "      - uses: dawidd6/action-download-artifact@2f00e0a\n"), 1},
+		{"lookalike repository", step(on, "      - uses: dawidd6/action-download-artifact-plus@v1\n"), 0},
+		{"local action of the same name", step(on, "      - uses: ./dawidd6/action-download-artifact\n"), 0},
+		{"docker image of the same name", step(on, "      - uses: docker://dawidd6/action-download-artifact:latest\n"), 0},
 		{"local download action", step(on, "      - uses: blablacar/action-download-last-artifact@v1\n"), 1},
 		{"gh run download", step(on, "      - run: gh run download 1234\n"), 1},
 		{"downloadArtifact in github-script", step(on, "      - uses: actions/github-script@v7\n        with:\n          script: |\n            await github.rest.actions.downloadArtifact({})\n"), 1},
+		{"downloadArtifact in github-script with another case", step(on, "      - uses: Actions/GitHub-Script@v7\n        with:\n          script: |\n            await github.rest.actions.downloadArtifact({})\n"), 1},
 		{"official download-artifact", step(on, "      - uses: actions/download-artifact@v4\n"), 0},
 		{"gh run list", step(on, "      - run: gh run list\n"), 0},
 	})
@@ -52,6 +59,8 @@ func TestRuleDangerousCheckout(t *testing.T) {
 
 	runCases(t, "dangerous-checkout", []ruleCase{
 		{"checkout action with PR ref", step(on, "      - uses: actions/checkout@v4\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"), 1},
+		{"checkout action with another case", step(on, "      - uses: Actions/Checkout@v4\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"), 1},
+		{"lookalike checkout action with PR ref", step(on, "      - uses: actions/checkout-fork@v4\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"), 0},
 		{"checkout action with static ref", step(on, "      - uses: actions/checkout@v4\n        with:\n          ref: main\n"), 0},
 		{"checkout action without ref", step(on, "      - uses: actions/checkout@v4\n"), 0},
 		{"git checkout with variable", step(on, "      - run: git checkout $REF\n"), 1},
@@ -85,6 +94,9 @@ func TestRuleDangerousCheckoutPRProtection(t *testing.T) {
 		{"v1 is not protected", "pull_request_target", "actions/checkout@v1", "does not have the fork pull request protection"},
 		{"pinned SHA", "pull_request_target", "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "is pinned"},
 		{"patch version", "pull_request_target", "actions/checkout@v4.2.2", "is pinned"},
+		{"short SHA is ambiguous", "pull_request_target", "actions/checkout@11bd719", "short SHA"},
+		{"branch is mutable", "pull_request_target", "actions/checkout@main", "mutable"},
+		{"another case", "pull_request_target", "Actions/Checkout@v4", "refuses fork pull request code"},
 		{"event without the protection", "issue_comment", "actions/checkout@v4", ""},
 	}
 

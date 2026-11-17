@@ -2,7 +2,6 @@ package rules
 
 import (
 	"slices"
-	"strings"
 
 	"github.com/synacktiv/octoscan/common"
 
@@ -73,7 +72,7 @@ func (rule *RuleToctou) VisitStep(n *actionlint.Step) error {
 }
 
 func (rule *RuleToctou) checkCheckoutAction(e *actionlint.ExecAction) {
-	if e.Uses == nil || !strings.HasPrefix(e.Uses.Value, "actions/checkout") {
+	if e.Uses == nil || !ParseActionRef(e.Uses.Value).Is("actions/checkout") {
 		return
 	}
 

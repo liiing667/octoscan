@@ -131,7 +131,7 @@ func (rule *RuleExpressionInjection) VisitStep(n *actionlint.Step) error {
 			rule.checkString(e.Entrypoint, "")
 			rule.checkString(e.Args, "")
 		} else {
-			if script := e.Inputs["script"]; script != nil && strings.HasPrefix(e.Uses.Value, "actions/github-script") {
+			if script := e.Inputs["script"]; script != nil && ParseActionRef(e.Uses.Value).Is("actions/github-script") {
 				rule.checkString(script.Value, "jobs.<job_id>.steps.with")
 			}
 		}

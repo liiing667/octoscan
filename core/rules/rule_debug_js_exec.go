@@ -2,7 +2,6 @@ package rules
 
 import (
 	"regexp"
-	"strings"
 
 	"github.com/rhysd/actionlint"
 )
@@ -53,7 +52,7 @@ var jsExecRegexp = regexp.MustCompile(`(?m)exec.exec\(`)
 func (rule *RuleDebugJSExec) checkJSExec(exec *actionlint.ExecAction) {
 	spec := exec.Uses.Value
 
-	if strings.HasPrefix(spec, "actions/github-script") {
+	if ParseActionRef(spec).Is("actions/github-script") {
 		if script := exec.Inputs["script"]; script != nil {
 			reportInScript(&rule.RuleBase, script.Value, jsExecRegexp, nil, "Use of \"exec.exec()\" in \"actions/github-script\" action.")
 		}

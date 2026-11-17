@@ -47,7 +47,7 @@ func checkForSpecificActions(rule *actionlint.RuleBase, exec *actionlint.ExecAct
 func checkForSpecificAction(rule *actionlint.RuleBase, exec *actionlint.ExecAction, action string) {
 	spec := exec.Uses.Value
 
-	if strings.HasPrefix(spec, action) {
+	if ParseActionRef(spec).Is(action) {
 		rule.Errorf(
 			exec.Uses.Pos,
 			"Use of action %q",

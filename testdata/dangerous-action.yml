@@ -1,6 +1,6 @@
 # VULNERABLE EXAMPLE for the "dangerous-action" rule, do not use it as a template.
 # Run:    ./octoscan scan testdata/dangerous-action.yml
-# expect: dangerous-action=6
+# expect: dangerous-action=8
 
 # A workflow_run (or pull_request_target) workflow that downloads the artifacts of a run triggered by a PR runs
 # with data the attacker controls: a poisoned artifact is then used by the privileged workflow (artifact poisoning).
@@ -23,6 +23,16 @@ jobs:
       - uses: dawidd6/action-download-artifact@v6
         with:
           repo: someone/fork
+          workflow: build.yml
+
+      # the same action under another string: GitHub resolves repository names
+      # case-insensitively and a commit SHA pins the same code
+      - uses: Dawidd6/Action-Download-Artifact@v6
+        with:
+          repo: someone/fork
+          workflow: build.yml
+      - uses: dawidd6/action-download-artifact@2f00e0a2c4c0a4fb8f3a4b3b6b7a0a2a1f0e0d01
+        with:
           workflow: build.yml
 
       # the last artifact of a workflow

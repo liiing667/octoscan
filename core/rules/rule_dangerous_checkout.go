@@ -67,7 +67,7 @@ func (rule *RuleDangerousCheckout) checkCheckoutAction(action *actionlint.ExecAc
 	spec := action.Uses.Value
 
 	// search for checkout action
-	if !strings.HasPrefix(spec, "actions/checkout") {
+	if !ParseActionRef(spec).Is("actions/checkout") {
 		return
 	}
 
@@ -105,9 +105,9 @@ func (rule *RuleDangerousCheckout) protectionNote(spec string) string {
 		return ""
 	}
 
-	_, ref, _ := strings.Cut(spec, "@")
+	action := ParseActionRef(spec)
 
-	if major, err := strconv.Atoi(strings.TrimPrefix(ref, "v")); err == nil && strings.HasPrefix(ref, "v") {
+	if major, err := strconv.Atoi(strings.TrimPrefix(action.Ref, "v")); err == nil && strings.HasPrefix(action.Ref, "v") {
 		if major >= 2 {
 			return fmt.Sprintf(" %q refuses fork pull request code in this event unless 'allow-unsafe-pr-checkout' is set.", spec)
 		}
@@ -115,7 +115,37 @@ func (rule *RuleDangerousCheckout) protectionNote(spec string) string {
 		return fmt.Sprintf(" %q does not have the fork pull request protection of actions/checkout v7.", spec)
 	}
 
-	return fmt.Sprintf(" %q is pinned: it has the fork pull request protection only if it is actions/checkout v7 or later.", spec)
+	switch action.Pin {
+	case PinSHA:
+		return fmt.Sprintf(" %q is pinned: it has the fork pull request protection only if it is actions/checkout v7 or later.", spec)
+	case PinShortSHA:
+		// a short SHA is not a valid pin: fail closed, the protection cannot be asserted
+		return fmt.Sprintf(" %q is a short SHA, an ambiguous reference: it has the fork pull request protection only if it is actions/checkout v7 or later.", spec)
+	case PinMutable:
+		if looksLikeVersion(action.Ref) {
+			return fmt.Sprintf(" %q is pinned: it has the fork pull request protection only if it is actions/checkout v7 or later.", spec)
+		}
+
+		return fmt.Sprintf(" %q is a mutable reference: it has the fork pull request protection only if it resolves to actions/checkout v7 or later.", spec)
+	default:
+		return fmt.Sprintf(" %q does not pin a version: it has the fork pull request protection only if it resolves to actions/checkout v7 or later.", spec)
+	}
+}
+
+// looksLikeVersion reports whether ref is a full version tag like "v4.2.2" (as opposed to a
+// branch name): a tag can move, but such a ref at least names a released version.
+func looksLikeVersion(ref string) bool {
+	if !strings.HasPrefix(ref, "v") {
+		return false
+	}
+
+	for _, part := range strings.Split(strings.TrimPrefix(ref, "v"), ".") {
+		if _, err := strconv.Atoi(part); err != nil {
+			return false
+		}
+	}
+
+	return strings.Contains(ref, ".")
 }
 
 func (rule *RuleDangerousCheckout) checkManualCheckout(action *actionlint.ExecRun) {

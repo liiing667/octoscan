@@ -58,15 +58,16 @@ func (rule *RuleDangerousArtefact) VisitStep(n *actionlint.Step) error {
 	}
 
 	spec := e.Uses.Value
+	action := ParseActionRef(spec)
 
 	switch {
-	case strings.HasPrefix(spec, "actions/checkout"):
+	case action.Is("actions/checkout"):
 		// the token is persisted in .git/config unless it is explicitly disabled
 		persist := e.Inputs["persist-credentials"]
 		if persist == nil || !strings.EqualFold(strings.TrimSpace(persist.Value.Value), "false") {
 			rule.persistedCredentials = true
 		}
-	case strings.HasPrefix(spec, "actions/upload-artifact"):
+	case action.Is("actions/upload-artifact"):
 		rule.checkUpload(e)
 	}
 

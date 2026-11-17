@@ -1,8 +1,6 @@
 package rules
 
 import (
-	"strings"
-
 	"github.com/rhysd/actionlint"
 )
 
@@ -44,7 +42,7 @@ func (rule *RuleDebugArtefacts) VisitStep(n *actionlint.Step) error {
 
 	spec := e.Uses.Value
 
-	if strings.HasPrefix(spec, "actions/upload-artifact") {
+	if ParseActionRef(spec).Is("actions/upload-artifact") {
 
 		path := e.Inputs["path"]
 		if path != nil {

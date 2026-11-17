@@ -2,7 +2,6 @@ package rules
 
 import (
 	"regexp"
-	"strings"
 
 	"github.com/synacktiv/octoscan/common"
 
@@ -73,9 +72,10 @@ func (rule *RuleDangerousAction) VisitStep(n *actionlint.Step) error {
 
 func (rule *RuleDangerousAction) checkDownloadActions(exec *actionlint.ExecAction) {
 	spec := exec.Uses.Value
+	action := ParseActionRef(spec)
 
-	for _, action := range downloadArtifactActionExternal {
-		if strings.HasPrefix(spec, action) {
+	for _, download := range downloadArtifactActionExternal {
+		if action.Is(download) {
 			if exec.Inputs["repo"] != nil {
 				rule.Errorf(
 					exec.Inputs["repo"].Value.Pos,
@@ -146,7 +146,7 @@ var downloadArtifactRegexp = regexp.MustCompile(`(?m)downloadArtifact`)
 func (rule *RuleDangerousAction) checkDownloadInGitHubScript(exec *actionlint.ExecAction) {
 	spec := exec.Uses.Value
 
-	if strings.HasPrefix(spec, "actions/github-script") {
+	if ParseActionRef(spec).Is("actions/github-script") {
 		if script := exec.Inputs["script"]; script != nil {
 			reportInScript(&rule.RuleBase, script.Value, downloadArtifactRegexp, nil, "Use of \"downloadArtifact\" in \"actions/github-script\" action.")
 		}

@@ -89,7 +89,7 @@ func (rule *RulePromptInjection) VisitStep(n *actionlint.Step) error {
 				rule.aiSteps[strings.ToLower(n.ID.Value)] = agent
 				rule.aiOutputExpr = nil // rebuilt on the next use
 			}
-		} else if strings.HasPrefix(strings.ToLower(e.Uses.Value), "actions/github-script") && e.Inputs["script"] != nil {
+		} else if ParseActionRef(e.Uses.Value).Is("actions/github-script") && e.Inputs["script"] != nil {
 			rule.checkAgentOutput(e.Inputs["script"].Value)
 		}
 	case *actionlint.ExecRun:
@@ -101,10 +101,10 @@ func (rule *RulePromptInjection) VisitStep(n *actionlint.Step) error {
 
 // aiAgentName returns the name of the AI agent action used by spec, empty if it is not one.
 func aiAgentName(spec string) string {
-	path, _, _ := strings.Cut(strings.ToLower(spec), "@")
+	action := ParseActionRef(spec)
 
 	for _, agent := range aiAgentActions {
-		if path == agent || strings.HasPrefix(path, agent+"/") {
+		if action.Is(agent) {
 			return agent
 		}
 	}

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -98,14 +97,13 @@ func (rule *RuleRepoJacking) VisitStep(n *actionlint.Step) error {
 
 	spec := e.Uses.Value
 
-	// Parse {owner}/{repo}@{ref} or {owner}/{repo}/{path}@{ref}
-	// "./" and "$/" are references to the caller repository
-	owner, _, found := strings.Cut(spec, "/")
-	if !found || owner == "." || owner == "$" || strings.HasPrefix(spec, "docker://") {
+	// local actions ("./", "$/") and Docker images have no GitHub owner to check
+	action := ParseActionRef(spec)
+	if action.Kind != SourceRemote {
 		return nil
 	}
 
-	rule.actionsByOwner[owner] = append(rule.actionsByOwner[owner], actionUse{spec, e.Uses.Pos})
+	rule.actionsByOwner[action.Owner] = append(rule.actionsByOwner[action.Owner], actionUse{spec, e.Uses.Pos})
 
 	return nil
 }
